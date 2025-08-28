@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Лови объект!</title>
+  <style>
+    :root{--bg:#f5f5f5;--panel:#ffffff}
+    html,body{height:100%;margin:0;font-family:Arial,system-ui,-apple-system,Segoe UI,Roboto}
+    body{display:flex;align-items:center;justify-content:center;background:var(--bg)}
+    .wrap{width:100%;max-width:800px;padding:12px;box-sizing:border-box}
+    canvas{display:block;width:100%;height:auto;background:var(--panel);border:3px solid #111;border-radius:8px}
+    .hud{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:8px}
+    .left, .right{display:flex;gap:8px;align-items:center}
+    .panel{background:var(--panel);padding:8px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
+    .controls{position:relative;margin-top:10px;display:flex;gap:8px;justify-content:center}
+    .btn{padding:10px 14px;border-radius:8px;border:none;font-weight:700}
+    .big-btn{font-size:18px}
+    .touch-button{position:fixed;bottom:20px;width:22%;max-width:140px;padding:16px;border-radius:12px;background:#00000020;border:1px solid #00000010;font-size:18px;color:#111;text-align:center;user-select:none;-webkit-user-select:none}
+    #btnLeft{left:6%;}
+    #btnRight{right:6%;}
+    #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .menu{pointer-events:auto;background:rgba(255,255,255,0.98);padding:20px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.25);text-align:center}
+    .menu h2{margin:0 0 10px}
+    .skin-select{display:flex;gap:8px;justify-content:center;margin-top:8px}
+    .skin{cursor:pointer;padding:8px;border-radius:8px;border:2px solid transparent}
+    .skin.active{border-color:#007bff}
+    @media (min-width:700px){.touch-button{display:none}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+
+    <div class="hud">
+      <div class="left panel">
+        <div id="score">Счёт: 0</div>
+        <div id="lives" style="margin-left:12px">Жизни: 3</div>
+      </div>
+      <div class="right panel">
+        <div id="level">Уровень: 1</div>
+        <div id="best" style="margin-left:12px">Рекорд: 0</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="restart" class="btn panel">Перезапустить</button>
+      <div style="width:8px"></div>
+      <div class="panel" style="padding:6px;display:flex;align-items:center;gap:8px">
+        <label>Скины:</label>
+        <div class="skin-select">
+          <div class="skin active" data-skin="basket">🧺</div>
+          <div class="skin" data-skin="cat">🐱</div>
+          <div class="skin" data-skin="robot">🤖</div>
+        </div>
+      </div>
+      <div style="width:8px"></div>
+      <div class="panel" style="padding:6px">Звук: <input type="checkbox" id="soundToggle" checked></div>
+    </div>
+  </div>
+
+  <!-- Кнопки для мобильных (показываются через CSS) -->
+  <div id="btnLeft" class="touch-button">◀</div>
+  <div id="btnRight" class="touch-button">▶</div>
+
+  <div id="overlay"></div>
+
+  <script>
+  // ===================== Настройки и состояние =====================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const WIDTH = canvas.width;
+  const HEIGHT = canvas.height;
+
+  let score = 0;
+  let lives = 3;
+  let level = 1;
+  let best = Number(localStorage.getItem('catch_best') || 0);
+
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const levelEl = document.getElementById('level');
+  const bestEl = document.getElementById('best');
+  bestEl.textContent = 'Рекорд: ' + best;
+
+  // Игрок
+  let player = {w:70, h:40, x: WIDTH/2 - 35, y: HEIGHT - 60, speed: 6, skin: 'basket'};
+
+  // Объекты (массив)
+  const objects = [];
+  const MAX_OBJECTS_BASE = 2; // увеличивается с уровнем
+
+  // Звуки (WebAudio)
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  let soundOn = true;
+  document.getElementById('soundToggle').addEventListener('change',(e)=>{soundOn=e.target.checked});
+
+  function beep(freq, time=0.08, type='sine'){if(!soundOn) return; const o=audioCtx.createOscillator(); const g=audioCtx.createGain(); o.type=type; o.frequency.value=freq; o.connect(g); g.connect(audioCtx.destination); g.gain.value=0.0001; o.start(); g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime+time); o.stop(audioCtx.currentTime+time+0.02)}
+  function playCatch(){beep(880,0.09,'sine');beep(1320,0.06,'triangle')}
+  function playMiss(){beep(220,0.18,'sawtooth')}
+  function playBomb(){beep(110,0.25,'square');beep(60,0.15,'sine')}
+
+  // Клавиатура и тач
+  const keys = {};
+  let touchDir = null;
+  document.addEventListener('keydown', e=>keys[e.key]=true);
+  document.addEventListener('keyup', e=>keys[e.key]=false);
+
+  canvas.addEventListener('touchstart', e=>{
+    const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    const x = t.clientX - rect.left;
+    touchDir = x < WIDTH/2 ? 'left' : 'right';
+    e.preventDefault();
+  }, {passive:false});
+  canvas.addEventListener('touchend', ()=>{ touchDir = null });
+
+  // Кнопки мобильные
+  document.getElementById('btnLeft').addEventListener('touchstart', ()=>touchDir='left');
+  document.getElementById('btnLeft').addEventListener('touchend', ()=>touchDir=null);
+  document.getElementById('btnRight').addEventListener('touchstart', ()=>touchDir='right');
+  document.getElementById('btnRight').addEventListener('touchend', ()=>touchDir=null);
+
+  // Кнопки в интерфейсе
+  document.getElementById('restart').addEventListener('click', ()=>startGame());
+
+  // Скины
+  document.querySelectorAll('.skin').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      document.querySelectorAll('.skin').forEach(s=>s.classList.remove('active'));
+      el.classList.add('active');
+      player.skin = el.dataset.skin;
+    })
+  });
+
+  // ===================== Функции объектов =====================
+  function rand(min,max){return Math.random()*(max-min)+min}
+
+  function spawnObject(){
+    // Типы: 'normal' +1, 'gold' +2, 'bomb' -1 life
+    const r = Math.random();
+    let type = 'normal';
+    if (r > 0.92) type = 'bomb';
+    else if (r > 0.80) type = 'gold';
+
+    const size = type==='bomb' ? rand(26,40) : rand(20,34);
+    const speed = rand(2 + level*0.5, 3 + level*0.9);
+
+    objects.push({x: rand(10, WIDTH - size - 10), y:-size, w:size, h:size, type, speed});
+  }
+
+  // ===================== Игровой цикл =====================
+  let running = false;
+  let overlay = document.getElementById('overlay');
+
+  function startGame(){
+    score = 0; lives = 3; level = 1; objects.length = 0; running = true; player.x = WIDTH/2 - player.w/2; scoreEl.textContent = 'Счёт: ' + score; livesEl.textContent='Жизни: '+lives; levelEl.textContent='Уровень: '+level; hideMenu();
+  }
+
+  function gameOver(){
+    running = false;
+    if (score > best){ best = score; localStorage.setItem('catch_best', best); bestEl.textContent = 'Рекорд: ' + best; }
+    showMenu(true);
+  }
+
+  function showMenu(isGameOver=false){
+    overlay.innerHTML = '';
+    const menu = document.createElement('div'); menu.className='menu panel';
+    const title = document.createElement('h2');
+    title.textContent = isGameOver ? 'Game Over' : 'Пауза';
+    const p = document.createElement('p'); p.textContent = isGameOver ? `Счёт: ${score}` : `Счёт: ${score}`;
+    const btn = document.createElement('button'); btn.className='btn big-btn panel'; btn.textContent = isGameOver ? 'Играть снова' : 'Продолжить';
+    btn.addEventListener('click', ()=>{ overlay.innerHTML=''; startGame(); });
+    menu.appendChild(title); menu.appendChild(p);
+    if (isGameOver){
+      const rec = document.createElement('p'); rec.textContent = 'Рекорд: ' + best; menu.appendChild(rec);
+    }
+    menu.appendChild(btn);
+    overlay.appendChild(menu);
+  }
+  function hideMenu(){ overlay.innerHTML = '' }
+
+  // ===================== Рисование =====================
+  function drawPlayer(){
+    const x = player.x, y = player.y, w = player.w, h = player.h;
+    ctx.save();
+    // рисуем корзину/скины
+    ctx.translate(x,y);
+    if (player.skin === 'basket'){
+      // корзина: полукруг и ручки
+      ctx.fillStyle = '#7b3';
+      roundRect(ctx,0,0,w,h,8,true,false);
+      ctx.fillStyle = '#5a2';
+      ctx.beginPath(); ctx.moveTo(6, -4); ctx.quadraticCurveTo(w/2, -18, w-6, -4); ctx.fill();
+    } else if (player.skin === 'cat'){
+      // кат: simple cat face
+      ctx.fillStyle='#444'; roundRect(ctx,0,0,w,h,10,true,false);
+      ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(w*0.35,h*0.45,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(w*0.65,h*0.45,6,0,Math.PI*2); ctx.fill();
+    } else if (player.skin === 'robot'){
+      ctx.fillStyle='#3b82f6'; roundRect(ctx,0,0,w,h,6,true,false);
+      ctx.fillStyle='#0ea5e9'; ctx.fillRect(w*0.15,h*0.2,w*0.7,h*0.6);
+    }
+    ctx.restore();
+  }
+
+  function drawObject(o){
+    if (o.type==='normal'){
+      ctx.fillStyle='#e53935'; ctx.fillRect(o.x,o.y,o.w,o.h);
+      // draw small highlight
+      ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.fillRect(o.x+4,o.y+4, o.w*0.4, o.h*0.4);
+    } else if (o.type==='gold'){
+      // gold circle
+      ctx.fillStyle='#ffb300'; ctx.beginPath(); ctx.ellipse(o.x+o.w/2,o.y+o.h/2,o.w/2,o.h/2,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,0.25)'; ctx.beginPath(); ctx.ellipse(o.x+o.w*0.35,o.y+o.h*0.35,o.w*0.14,o.h*0.14,0,0,Math.PI*2); ctx.fill();
+    } else if (o.type==='bomb'){
+      // bomb circle with fuse
+      ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(o.x+o.w/2,o.y+o.h/2,o.w/2,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#ff5722'; ctx.beginPath(); ctx.moveTo(o.x+o.w*0.85,o.y+o.h*0.15); ctx.lineTo(o.x+o.w*1.2,o.y - o.h*0.5); ctx.stroke();
+      ctx.fillStyle='#fff'; ctx.font='bold 12px Arial'; ctx.fillText('!', o.x+o.w*0.45, o.y+o.h*0.6);
+    }
+  }
+
+  function roundRect(ctx,x,y,w,h,r,fill,stroke){ if(typeof r==='undefined') r=5; ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); if(fill) ctx.fill(); if(stroke) ctx.stroke(); }
+
+  // ===================== Логика столкновений и обновления =====================
+  function update(dt){
+    // движение игрока
+    if ((keys['ArrowLeft']||keys['a']||touchDir==='left') && player.x>0) player.x -= player.speed;
+    if ((keys['ArrowRight']||keys['d']||touchDir==='right') && player.x + player.w < WIDTH) player.x += player.speed;
+
+    // ограничение
+    player.x = Math.max(0, Math.min(WIDTH - player.w, player.x));
+
+    // спаун объектов по потребности
+    const targetCount = Math.min(6, MAX_OBJECTS_BASE + Math.floor(level/1.5));
+    while(objects.length < targetCount) spawnObject();
+
+    // обновляем объекты
+    for (let i = objects.length-1; i >=0; i--){
+      const o = objects[i];
+      o.y += o.speed; // падает вниз
+      // столкновение с игроком
+      if (rectsOverlap(o, player)){
+        if (o.type === 'normal'){ score += 1; playCatch(); }
+        else if (o.type === 'gold'){ score += 2; playCatch(); }
+        else if (o.type === 'bomb'){ lives -= 1; playBomb(); }
+        objects.splice(i,1);
+        continue;
+      }
+      // если упал мимо
+      if (o.y > HEIGHT){
+        if (o.type === 'bomb'){
+          // bomb missed — nothing special
+        } else {
+          // normal or gold missed -> lose life
+          lives -= 1;
+          playMiss();
+        }
+        objects.splice(i,1);
+      }
+    }
+
+    // уровень по очкам
+    level = Math.floor(score / 6) + 1;
+
+    // проверка жизни
+    if (lives <= 0) gameOver();
+
+    // обновления HUD
+    scoreEl.textContent = 'Счёт: ' + score;
+    livesEl.textContent = 'Жизни: ' + Math.max(0,lives);
+    levelEl.textContent = 'Уровень: ' + level;
+  }
+
+  function rectsOverlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y }
+
+  // ===================== Рендер =====================
+  function draw(){
+    ctx.clearRect(0,0,WIDTH,HEIGHT);
+    // фон
+    ctx.fillStyle = 'linear-gradient(180deg,#fff,#eee)'; // not used but harmless
+
+    // рисуем объекты
+    for (const o of objects) drawObject(o);
+
+    // рисуем игрок
+    drawPlayer();
+
+    // стрелки и подсказки
+    ctx.fillStyle = '#222'; ctx.font='14px Arial'; ctx.fillText('Нажми слева/справа или используй кнопки', 10, HEIGHT - 6);
+  }
+
+  // ===================== Цикл с фиксированным шагом =====================
+  let last = performance.now();
+  function loop(now){
+    const dt = (now - last) / 1000; last = now;
+    if (running) update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ===================== Начальное меню и автозапуск =====================
+  function init(){
+    // покажем короткое интро и кнопку "Играть"
+    overlay.innerHTML = '';
+    const menu = document.createElement('div'); menu.className='menu panel';
+    const title = document.createElement('h2'); title.textContent = 'Лови объект!';
+    const p = document.createElement('p'); p.textContent = 'Управление: касания слева/справа, кнопки, или стрелки на клавиатуре.';
+    const info = document.createElement('p'); info.textContent = 'Цели: ловите обычные объекты (+1), золотые (+2). Бомбы отнимают жизнь.';
+    const btn = document.createElement('button'); btn.className='btn big-btn panel'; btn.textContent='Играть'; btn.addEventListener('click', ()=>{ startGame(); });
+    menu.appendChild(title); menu.appendChild(p); menu.appendChild(info); menu.appendChild(btn);
+    overlay.appendChild(menu);
+  }
+
+  init();
+
+  // Подстройка canvas под размер экрана (красиво масштабирует)
+  function fitCanvas(){
+    const wrapW = Math.min(window.innerWidth - 24, 800);
+    canvas.style.width = wrapW + 'px';
+    canvas.style.height = Math.round(wrapW * (HEIGHT / WIDTH)) + 'px';
+    // reposition mobile buttons relative to viewport
+  }
+  window.addEventListener('resize', fitCanvas); fitCanvas();
+
+  </script>
+</body>
+</html>
